@@ -146,6 +146,15 @@ def create_payment_link(title: str, price: float, phone: str = ""):
     return res.get("init_point")
 
 # --- WEBHOOKS (META / WHATSAPP / INSTA / FB) ---
+
+# Verificação do Webhook da Meta
+@app.get("/webhook/meta")
+async def verify_meta(request: Request):
+    params = request.query_params
+    if params.get("hub.mode") == "subscribe" and params.get("hub.verify_token") == META_VERIFY_TOKEN:
+        return Response(content=params.get("hub.challenge"))
+    return HTTPException(status_code=403)
+
 @app.post("/webhook/meta")
 async def handle_meta(request: Request):
     body = await request.json()

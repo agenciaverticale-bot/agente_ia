@@ -3,3 +3,8 @@ uvicorn
 requests
 python-dotenv
 pydantic
+supabase
+sentence-transformers
+streamlit
+pandas
+facebook-business

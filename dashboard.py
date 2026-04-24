@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from supabase import create_client, Client
 import pandas as pd
 import requests
+import time
 
 # Carrega as variáveis de ambiente
 load_dotenv()
@@ -12,71 +13,106 @@ st.set_page_config(page_title="CRM Chatbot Admin", page_icon="🤖", layout="wid
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-META_ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN")
+WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
+MESSENGER_ACCESS_TOKEN = os.getenv("MESSENGER_ACCESS_TOKEN")
+INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN")
 
 if not SUPABASE_URL or not SUPABASE_KEY:
-    st.error("⚠️ As variáveis SUPABASE_URL ou SUPABASE_KEY não foram encontradas. Verifique se o seu arquivo .env está na mesma pasta e preenchido corretamente!")
-    st.stop()
-
-if not SUPABASE_URL.startswith("http"):
-    st.error(f"⚠️ A sua SUPABASE_URL parece estar no formato errado. Ela deve ser a URL da API (começando com 'https://'), mas atualmente é: `{SUPABASE_URL}`")
+    st.error("⚠️ Configurações do Supabase não encontradas!")
     st.stop()
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# --- FUNÇÃO PARA ENVIAR MENSAGEM (WHATSAPP) ---
-def send_whatsapp_message(to: str, text: str):
-    if not META_ACCESS_TOKEN or not WHATSAPP_PHONE_NUMBER_ID:
-        st.error("Credenciais da Meta não configuradas no .env")
-        return False
-    url = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
-    headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}", "Content-Type": "application/json"}
-    data = {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "text",
-        "text": {"body": text}
-    }
+# --- FUNÇÕES DE ENVIO ---
+def send_message(to: str, text: str, platform: str):
+    if platform == "whatsapp":
+        url = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
+        headers = {"Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}", "Content-Type": "application/json"}
+        data = {"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": text}}
+    else:
+        access_token = INSTAGRAM_ACCESS_TOKEN if platform == "instagram" else MESSENGER_ACCESS_TOKEN
+        url = f"https://graph.facebook.com/v18.0/me/messages?access_token={access_token}"
+        data = {"recipient": {"id": to}, "message": {"text": text}}
+        headers = {"Content-Type": "application/json"}
+    
     res = requests.post(url, headers=headers, json=data)
     return res.status_code == 200
 
 st.title("🎛️ Painel do Chatbot Multicanal")
 
+# --- LOGIN SIMULADO (PREPARAÇÃO PARA OAUTH) ---
+if 'logged_in' not in st.session_state:
+    st.session_state.logged_in = False
+
+if not st.session_state.logged_in:
+    st.subheader("Login Administrativo")
+    
+    # Verifica se o usuário já está logado via URL (retorno do Supabase)
+    query_params = st.query_params
+    if "access_token" in query_params or "id_token" in query_params:
+        st.session_state.logged_in = True
+        st.rerun()
+
+    if st.button("Entrar com Facebook"):
+        try:
+            # Gera a URL de login do Facebook via Supabase
+            res = supabase.auth.sign_in_with_oauth({
+                "provider": "facebook",
+                "options": {
+                    "redirect_to": "https://crm.agenciaverticale.com.br" # Seu domínio profissional
+                }
+            })
+            if res.url:
+                st.link_button("Clique aqui para autorizar no Facebook", res.url)
+                st.info("Após autorizar, você será redirecionado de volta para cá.")
+        except Exception as e:
+            st.error(f"Erro ao iniciar login: {e}")
+    st.stop()
+
 aba1, aba2, aba3, aba4 = st.tabs(["💬 Atendimento Direto", "📊 Kanban & Funil", "🗄️ Histórico Bruto", "🧠 Base de Conhecimento"])
 
 with aba1:
     st.header("Atendimento Direto")
-    st.write("Assuma o controle da conversa e fale diretamente com o cliente.")
     
     try:
-        # Busca telefones únicos para o seletor
-        res_phones = supabase.table("chat_history").select("phone").execute()
+        # Busca telefones/IDs únicos
+        res_phones = supabase.table("chat_history").select("phone, platform").execute()
         if res_phones.data:
-            unique_phones = list(set([item["phone"] for item in res_phones.data]))
-            selected_phone = st.selectbox("Selecione o Cliente para Atendimento:", unique_phones)
+            df_contacts = pd.DataFrame(res_phones.data).drop_duplicates()
+            contact_list = [f"{row['phone']} ({row['platform']})" for _, row in df_contacts.iterrows()]
+            selected_contact_str = st.selectbox("Selecione o Cliente:", contact_list)
             
-            # Exibe o histórico de chat usando os componentes nativos do Streamlit
-            if selected_phone:
-                st.divider()
-                chat_res = supabase.table("chat_history").select("role, content").eq("phone", selected_phone).order("created_at", asc=True).execute()
+            if selected_contact_str:
+                selected_phone = selected_contact_str.split(" (")[0]
+                selected_platform = selected_contact_str.split(" (")[1].replace(")", "")
                 
-                # Container para o chat
-                chat_container = st.container(height=400)
+                st.divider()
+                chat_res = supabase.table("chat_history").select("role, content, created_at").eq("phone", selected_phone).order("created_at", asc=True).execute()
+                
+                chat_container = st.container(height=500)
                 with chat_container:
                     for msg in chat_res.data:
-                        # Define o avatar visual baseado em quem mandou a mensagem
                         avatar = "🧑‍💻" if msg["role"] in ["assistant", "admin"] else "👤"
                         with st.chat_message(msg["role"], avatar=avatar):
                             st.markdown(msg["content"])
+                            st.caption(f"{msg['created_at']}")
                 
-                # Caixa de input para o administrador enviar mensagem
-                if admin_text := st.chat_input("Digite sua mensagem para o cliente..."):
-                    # Salva no banco de dados como 'admin'
-                    supabase.table("chat_history").insert({"phone": selected_phone, "role": "admin", "content": admin_text}).execute()
-                    # Envia para a API do WhatsApp
-                    send_whatsapp_message(selected_phone, admin_text)
-                    st.rerun() # Atualiza a tela para mostrar a nova mensagem
+                if admin_text := st.chat_input("Digite sua resposta..."):
+                    # Salva no banco
+                    supabase.table("chat_history").insert({
+                        "phone": selected_phone, 
+                        "role": "admin", 
+                        "content": admin_text,
+                        "platform": selected_platform
+                    }).execute()
+                    # Envia para a API correspondente
+                    if send_message(selected_phone, admin_text, selected_platform):
+                        st.success("Mensagem enviada!")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error("Erro ao enviar mensagem. Verifique os tokens.")
         else:
             st.info("Nenhum cliente registrado ainda.")
     except Exception as e:
@@ -84,57 +120,23 @@ with aba1:
 
 with aba2:
     st.header("Kanban / Jornada do Cliente")
-    st.write("Visualize a etapa de cada cliente no seu CRM.")
-    
-    # Estrutura visual base de colunas para o Kanban
-    # Para alimentar com dados reais do HubSpot, faremos consultas à API do HubSpot aqui.
+    st.info("Integração com HubSpot ativa. Os leads abaixo são sincronizados automaticamente.")
     col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.subheader("🔵 Novos Leads")
-        with st.container(border=True):
-            st.write("**João Silva**\n\n+55 11 9999-9999")
-            st.button("Ver detalhes", key="btn1")
-            
-    with col2:
-        st.subheader("🟡 Em Negociação")
-        with st.container(border=True):
-            st.write("**Maria Souza**\n\n+55 11 8888-8888")
-            st.button("Ver detalhes", key="btn2")
-            
-    with col3:
-        st.subheader("🟢 Fechado / Ganho")
-        with st.container(border=True):
-            st.write("**Empresa XYZ**\n\n+55 11 7777-7777")
-            st.button("Ver detalhes", key="btn3")
+    # Exemplo estático que pode ser expandido com API do HubSpot
+    with col1: st.subheader("🔵 Novos Leads"); st.write("Aguardando contato...")
+    with col2: st.subheader("🟡 Em Negociação"); st.write("Propostas enviadas...")
+    with col3: st.subheader("🟢 Fechado / Ganho"); st.write("Vendas concluídas!")
 
 with aba3:
-    st.header("Conversas Recentes")
-    if st.button("🔄 Atualizar Conversas"):
-        st.rerun()
-        
-    try:
-        # Busca dados no Supabase
-        res = supabase.table("chat_history").select("*").order("created_at", desc=True).limit(50).execute()
-        if res.data:
-            df = pd.DataFrame(res.data)
-            df['created_at'] = pd.to_datetime(df['created_at']).dt.strftime('%d/%m/%Y %H:%M')
-            # Mostra uma tabela interativa bonita
-            st.dataframe(df[['created_at', 'phone', 'role', 'content']], use_container_width=True)
-        else:
-            st.info("Nenhuma conversa registrada ainda.")
-    except Exception as e:
-        st.error(f"Erro ao buscar histórico: {e}")
+    st.header("Histórico Geral")
+    if st.button("🔄 Atualizar"): st.rerun()
+    res = supabase.table("chat_history").select("*").order("created_at", desc=True).limit(100).execute()
+    if res.data:
+        st.dataframe(pd.DataFrame(res.data), use_container_width=True)
 
 with aba4:
-    st.header("Documentos na Memória da IA")
-    
-    try:
-        res_kb = supabase.table("knowledge_base").select("id, content").limit(100).execute()
-        if res_kb.data:
-            df_kb = pd.DataFrame(res_kb.data)
-            st.dataframe(df_kb, use_container_width=True)
-        else:
-            st.info("Sua base de conhecimento está vazia. Rode o script de inserir_conhecimento.py")
-    except Exception as e:
-        st.error(f"Erro ao buscar base de conhecimento: {e}")
+    st.header("Base de Conhecimento (RAG)")
+    st.write("Estes são os documentos que a IA usa para responder.")
+    res_kb = supabase.table("knowledge_base").select("id, content").execute()
+    if res_kb.data:
+        st.dataframe(pd.DataFrame(res_kb.data), use_container_width=True)

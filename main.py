@@ -12,7 +12,9 @@ app = FastAPI()
 
 # Configurações de API (Devem ser preenchidas no arquivo .env)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-META_ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN")
+WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
+MESSENGER_ACCESS_TOKEN = os.getenv("MESSENGER_ACCESS_TOKEN")
+INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN")
 META_VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN")
 TIKTOK_ACCESS_TOKEN = os.getenv("TIKTOK_ACCESS_TOKEN")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
@@ -41,7 +43,7 @@ def get_ai_response(user_message: str):
 # --- FUNÇÕES DE ENVIO ---
 def send_whatsapp_message(to: str, text: str):
     url = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
-    headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}", "Content-Type": "application/json"}
+    headers = {"Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}", "Content-Type": "application/json"}
     data = {
         "messaging_product": "whatsapp",
         "to": to,
@@ -50,9 +52,9 @@ def send_whatsapp_message(to: str, text: str):
     }
     requests.post(url, headers=headers, json=data)
 
-def send_meta_message(recipient_id: str, text: str, platform: str):
+def send_meta_message(recipient_id: str, text: str, access_token: str):
     # Funciona para Instagram e Facebook Messenger
-    url = f"https://graph.facebook.com/v18.0/me/messages?access_token={META_ACCESS_TOKEN}"
+    url = f"https://graph.facebook.com/v18.0/me/messages?access_token={access_token}"
     data = {
         "recipient": {"id": recipient_id},
         "message": {"text": text}
@@ -76,8 +78,8 @@ def send_tiktok_message(open_id: str, text: str):
 async def verify_meta(request: Request):
     params = request.query_params
     if params.get("hub.mode") == "subscribe" and params.get("hub.verify_token") == META_VERIFY_TOKEN:
-        return Response(content=params.get("hub.challenge"))
-    return HTTPException(status_code=403)
+        return Response(content=params.get("hub.challenge"), media_type="text/plain")
+    raise HTTPException(status_code=403, detail="Token de verificação inválido")
 
 # Recebimento de mensagens da Meta
 @app.post("/webhook/meta")
@@ -102,8 +104,9 @@ async def handle_meta(request: Request):
         text = messaging_event.get("message", {}).get("text", "")
         
         if text:
+            access_token = INSTAGRAM_ACCESS_TOKEN if body.get("object") == "instagram" else MESSENGER_ACCESS_TOKEN
             ai_reply = get_ai_response(text)
-            send_meta_message(sender_id, ai_reply, "meta")
+            send_meta_message(sender_id, ai_reply, access_token)
 
     return {"status": "ok"}
 

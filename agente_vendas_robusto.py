@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 from dotenv import load_dotenv
 from supabase import create_client, Client
+from sentence_transformers import SentenceTransformer
 
 load_dotenv()
 
@@ -16,7 +17,9 @@ app = FastAPI()
 
 # --- CONFIGURAÇÕES ---
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-META_ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN")
+WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
+MESSENGER_ACCESS_TOKEN = os.getenv("MESSENGER_ACCESS_TOKEN")
+INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN")
 META_VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN")
 TIKTOK_ACCESS_TOKEN = os.getenv("TIKTOK_ACCESS_TOKEN")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
@@ -28,6 +31,9 @@ MERCADO_PAGO_WEBHOOK_SECRET = os.getenv("MERCADO_PAGO_WEBHOOK_SECRET")
 
 # Inicializar Supabase
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# Inicializar Modelo de IA para Busca Vetorial (RAG)
+model = SentenceTransformer('all-MiniLM-L6-v2')
 
 # --- MEMÓRIA DA IA (SUPABASE) ---
 def get_chat_history(phone: str, limit: int = 10):
@@ -82,10 +88,9 @@ def sync_to_hubspot(phone: str, name: str = "Lead Novo", tag: str = "chatbot_lea
 
 # --- CAMADA DE CONHECIMENTO (RAG + SUPABASE) ---
 def get_knowledge_base(query: str):
-    # Aqui simulamos a busca vetorial no Supabase (pgvector)
-    # Na prática, você usaria: supabase.rpc('match_documents', {'query_embedding': ..., 'match_threshold': 0.5, 'match_count': 3})
     try:
-        res = supabase.table("knowledge_base").select("content").text_search("content", query).execute()
+        query_embedding = model.encode(query).tolist()
+        res = supabase.rpc('match_documents', {'query_embedding': query_embedding, 'match_threshold': 0.3, 'match_count': 3}).execute()
         if res.data:
             return "\n".join([item['content'] for item in res.data])
     except Exception as e:
@@ -119,7 +124,7 @@ def get_ai_sales_response(user_message: str, history: List[dict], knowledge: str
 # --- FUNÇÃO DE ENVIO DE MENSAGEM (WHATSAPP) ---
 def send_whatsapp_message(to: str, text: str):
     url = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
-    headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}", "Content-Type": "application/json"}
+    headers = {"Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}", "Content-Type": "application/json"}
     data = {
         "messaging_product": "whatsapp",
         "to": to,
@@ -147,27 +152,51 @@ def create_payment_link(title: str, price: float, phone: str = ""):
 
 # --- WEBHOOKS (META / WHATSAPP / INSTA / FB) ---
 
+# Callback de Login do Instagram / Meta
+@app.get("/auth/meta/callback")
+async def meta_auth_callback(request: Request):
+    # Rota usada como "URL de Redirecionamento" no painel da Meta
+    code = request.query_params.get("code")
+    if code:
+        return {"message": "Autenticacao concluida com sucesso! Voce ja pode fechar esta janela.", "codigo_recebido": code}
+    return {"error": "Nenhum codigo de autorizacao recebido."}
+
 # Verificação do Webhook da Meta
 @app.get("/webhook/meta")
 async def verify_meta(request: Request):
     params = request.query_params
+    
+    # --- DEBUG PARA DESCOBRIR O ERRO DA META ---
+    print("\n--- TENTATIVA DE VALIDAÇÃO DO WEBHOOK ---")
+    print(f"1. Parâmetros recebidos da Meta: {params}")
+    print(f"2. Token no seu .env: '{META_VERIFY_TOKEN}'")
+    print(f"3. Token recebido da Meta: '{params.get('hub.verify_token')}'")
+    print("-------------------------------------------\n")
+
     if params.get("hub.mode") == "subscribe" and params.get("hub.verify_token") == META_VERIFY_TOKEN:
-        return Response(content=params.get("hub.challenge"))
-    return HTTPException(status_code=403)
+        challenge = params.get("hub.challenge")
+        return Response(content=str(challenge), media_type="text/plain")
+    raise HTTPException(status_code=403, detail="Token de verificação inválido")
 
 @app.post("/webhook/meta")
 async def handle_meta(request: Request):
     body = await request.json()
-    # Lógica simplificada para extrair mensagem e remetente
+    # Lógica para extrair mensagem e remetente (WhatsApp, Instagram, Messenger)
     try:
+        print(f"DEBUG: Recebido corpo do webhook: {json.dumps(body)}")
         entry = body["entry"][0]
-        if "changes" in entry: # WhatsApp
+        
+        # --- WHATSAPP ---
+        if "changes" in entry:
             value = entry["changes"][0]["value"]
             if "messages" in value:
                 msg = value["messages"][0]
                 sender_id = msg["from"]
-                text = msg["text"]["body"]
+                text = msg.get("text", {}).get("body", "")
+                platform = "whatsapp"
                 
+                if not text: return {"status": "no text"}
+
                 # 1. Sincronizar CRM
                 sync_to_hubspot(sender_id)
                 
@@ -187,7 +216,6 @@ async def handle_meta(request: Request):
                     try:
                         preco = float(match.group(2).strip())
                         link = create_payment_link(produto, preco, sender_id)
-                        # Substitui a tag da IA pelo link real do Mercado Pago
                         reply = reply.replace(match.group(0), f"\n👉 *Link Seguro (Mercado Pago):* {link}\n")
                     except Exception as e:
                         print(f"Erro ao gerar link: {e}")
@@ -196,9 +224,36 @@ async def handle_meta(request: Request):
                 # --- ATUALIZAR HISTÓRICO NO SUPABASE ---
                 save_chat_message(sender_id, "user", text)
                 save_chat_message(sender_id, "assistant", reply)
-
-                # 4. Enviar Resposta (Função send_whatsapp_message do main.py)
+                
+                # 4. Enviar Resposta
                 send_whatsapp_message(sender_id, reply)
+
+        # --- MESSENGER / INSTAGRAM ---
+        elif "messaging" in entry:
+            messaging_event = entry["messaging"][0]
+            sender_id = messaging_event["sender"]["id"]
+            text = messaging_event.get("message", {}).get("text", "")
+            
+            # Detecta a plataforma correta pelo objeto do webhook
+            if body.get("object") == "instagram":
+                platform = "instagram"
+                access_token = INSTAGRAM_ACCESS_TOKEN
+            else:
+                platform = "messenger"
+                access_token = MESSENGER_ACCESS_TOKEN
+
+            if text:
+                knowledge = get_knowledge_base(text)
+                history = get_chat_history(sender_id, limit=10)
+                reply = get_ai_sales_response(text, history, knowledge)
+                
+                save_chat_message(sender_id, "user", text)
+                save_chat_message(sender_id, "assistant", reply)
+                
+                # Função de envio para Meta (Insta/Messenger)
+                url_meta = f"https://graph.facebook.com/v18.0/me/messages?access_token={access_token}"
+                data_meta = {"recipient": {"id": sender_id}, "message": {"text": reply}}
+                requests.post(url_meta, json=data_meta)
     except: pass
     return {"status": "ok"}
 
@@ -242,33 +297,6 @@ async def handle_payment_notification(request: Request):
                 return Response(status_code=403)
     except Exception as e:
         print(f"Erro ao validar assinatura do MP: {e}")
-        return Response(status_code=200)
-
-    # 3. Se a assinatura for válida e for um pagamento, processamos a venda
-    if event_type == "payment":
-        # Verificar status no Mercado Pago
-        url = f"https://api.mercadopago.com/v1/payments/{data_id}"
-        headers = {"Authorization": f"Bearer {MERCADO_PAGO_TOKEN}"}
-        res = requests.get(url, headers=headers).json()
+        return Response(status_code=500)
         
-        if res.get("status") == "approved":
-            print(f"SUCESSO! Pagamento {data_id} foi APROVADO!")
-            
-            # Resgata o telefone do cliente salvo na criação do link
-            phone = res.get("external_reference")
-            
-            if phone:
-                mensagem_pos_venda = (
-                    "🎉 *Pagamento Aprovado!*\n\n"
-                    "Muito obrigado pela sua compra! Seu pedido foi confirmado com sucesso.\n"
-                    "👉 *Acesse seu produto/instruções aqui:* https://crm.agenciaverticale.com.br/acesso\n\n"
-                    "Se precisar de suporte, é só me chamar por aqui mesmo!"
-                )
-                send_whatsapp_message(phone, mensagem_pos_venda)
-
-    # 4. Mercado Pago exige um retorno 200 (OK) para confirmar o recebimento
     return Response(status_code=200)
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)

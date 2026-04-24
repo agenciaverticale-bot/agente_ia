@@ -161,6 +161,24 @@ async def meta_auth_callback(request: Request):
         return {"message": "Autenticacao concluida com sucesso! Voce ja pode fechar esta janela.", "codigo_recebido": code}
     return {"error": "Nenhum codigo de autorizacao recebido."}
 
+# Callback de Desautorização (Meta Compliance)
+@app.post("/auth/meta/deauthorize")
+async def meta_deauthorize(request: Request):
+    return Response(status_code=200)
+
+# Callback de Exclusão de Dados (Meta Compliance)
+@app.post("/auth/meta/delete")
+async def meta_delete_data(request: Request):
+    return {
+        "url": "https://crm.agenciaverticale.com.br/",
+        "confirmation_code": "verticale-del-123"
+    }
+
+# Rota principal para evitar erro 404 (Not Found) no navegador
+@app.get("/")
+def read_root():
+    return {"message": "Chatbot Multicanal IA Ativo e Operacional!"}
+
 # Verificação do Webhook da Meta
 @app.get("/webhook/meta")
 async def verify_meta(request: Request):

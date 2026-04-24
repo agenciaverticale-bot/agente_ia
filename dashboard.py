@@ -17,6 +17,7 @@ WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
 MESSENGER_ACCESS_TOKEN = os.getenv("MESSENGER_ACCESS_TOKEN")
 INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN")
+DASHBOARD_URL = os.getenv("DASHBOARD_URL", "http://localhost:8501")
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     st.error("⚠️ Configurações do Supabase não encontradas!")
@@ -60,7 +61,7 @@ if not st.session_state.logged_in:
             res = supabase.auth.sign_in_with_oauth({
                 "provider": "facebook",
                 "options": {
-                    "redirect_to": "https://crm.agenciaverticale.com.br" # Seu domínio profissional
+                    "redirect_to": DASHBOARD_URL
                 }
             })
             if res.url:
